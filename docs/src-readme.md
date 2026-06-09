@@ -26,7 +26,7 @@ PYTHONPATH=../../src python3 -m douyin_im_grabber.net_grab \
   --group "财富自由团" --max-rounds 160 --idle-rounds 10
 
 # 或从仓库根目录
-./scripts/grab.sh --group "财富自由团" --max-rounds 160 --idle-rounds 10
+./src/grab.sh --group "财富自由团" --max-rounds 160 --idle-rounds 10
 ```
 
 ## 关键技术发现

@@ -1,6 +1,8 @@
 # 抓取内容（绝不上传）
 groups/
 data/
+archive/
+output/
 
 # 运行时
 .venv/
@@ -9,7 +11,8 @@ __pycache__/
 *.pyo
 .DS_Store
 
-# 配置和密钥
+# 密钥文件
+config/feishu_webhook.json
 .env
 *.env
 

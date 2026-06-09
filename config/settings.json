@@ -1,0 +1,22 @@
+{
+  "group_name": "财富自由团",
+  "chrome_cdp_url": "http://localhost:9222",
+  "grab": {
+    "max_rounds": 160,
+    "idle_rounds": 10,
+    "wheel_events": 24,
+    "delta_y": -1200,
+    "round_wait": 2.5,
+    "quiet": false
+  },
+  "distill": {
+    "rules_file": "templates/蒸馏规则",
+    "model": "sonnet",
+    "max_budget_usd": 2.0,
+    "effort": "high"
+  },
+  "feishu": {
+    "webhook_url": "https://open.feishu.cn/open-apis/bot/v2/hook/74caed20-7b39-4f29-b7bb-f2aa1d363d3e",
+    "enable": true
+  }
+}

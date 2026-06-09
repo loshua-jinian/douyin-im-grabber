@@ -58,7 +58,7 @@ PYTHONPATH=src .venv/bin/python -m douyin_im_grabber.net_grab \
 
 或者用一键脚本：
 ```bash
-./scripts/grab.sh --group "你的群名" --max-rounds 160 --idle-rounds 10
+./src/grab.sh --group "你的群名" --max-rounds 160 --idle-rounds 10
 ```
 
 **预期运行时间**：每 1000 条约 20-40 秒，取决于网页滚动和响应体大小。

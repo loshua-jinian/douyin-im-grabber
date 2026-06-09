@@ -60,7 +60,7 @@ https://www.douyin.com/chat?isPopup=1
 python3 -m douyin_im_grabber.grab --group "你的群名" --mode full
 
 # 或用一键脚本
-./scripts/grab.sh --group "你的群名" --mode full
+./src/grab.sh --group "你的群名" --mode full
 ```
 
 **等待 3-10 分钟**（取决于群大小）。

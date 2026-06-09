@@ -2,7 +2,7 @@
 
 > 抖音群聊全量抓取工具 — 通过 Chrome CDP Network 拦截导出群聊历史
 
-**这个仓库同时是一个 Hermes skill** —— 详见 [SKILL.md](./SKILL.md)。
+**这个仓库同时是一个 Hermes skill** —— 详见 [docs/SKILL.md](./docs/SKILL.md)。
 
 ## 这是什么
 
@@ -41,7 +41,7 @@ pip install -r requirements.txt
 # 3. 回到终端：
 
 # 方式 A：一键脚本（推荐）
-./scripts/grab.sh --group "你的群名" --max-rounds 160 --idle-rounds 10
+./src/grab.sh --group "你的群名" --max-rounds 160 --idle-rounds 10
 
 # 方式 B：直接 python（需要 PYTHONPATH=./src）
 PYTHONPATH=./src python3 -m douyin_im_grabber.net_grab --group "你的群名"
