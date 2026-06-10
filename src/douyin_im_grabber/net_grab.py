@@ -15,7 +15,7 @@ import os
 import sys
 import time
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +46,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--wheel-events", type=int, default=24, help="每轮滚轮事件数")
     parser.add_argument("--delta-y", type=int, default=-1200, help="滚轮 deltaY")
     parser.add_argument("--round-wait", type=float, default=2.5, help="每轮等待网络响应秒数")
+    parser.add_argument("--stop-date", help="日期止损: YYYY-MM-DD，消息时间早于此日期即停止滚动")
     parser.add_argument("--no-md", action="store_true", help="只输出 JSON")
     parser.add_argument("--quiet", action="store_true", help="减少进度输出")
     args = parser.parse_args(argv)
@@ -696,11 +697,16 @@ def grab_group_via_network(
     round_wait: float = 2.5,
     output_md: bool = True,
     quiet: bool = False,
+    stop_date: str | None = None,
 ) -> dict[str, Any]:
     started_at = time.time()
     target = get_chat_tab()
     cdp = Cdp(target["webSocketDebuggerUrl"])
     all_messages: dict[str, dict[str, Any]] = {}
+
+    grab_error: Exception | None = None
+    user_map: dict[str, str] = {}
+    local_conv_id: str | None = None
 
     try:
         cdp.send("Page.bringToFront")
@@ -713,14 +719,22 @@ def grab_group_via_network(
             print(f"click: {click_result}")
 
         info = wait_for_message_list(cdp)
-        conv_id = get_current_conv_id(cdp)
+        local_conv_id = get_current_conv_id(cdp)
         if not quiet:
-            print(f"conv_id: {conv_id}")
+            print(f"conv_id: {local_conv_id}")
             print(
                 "message_list:",
                 f"scrollTop={info.get('scrollTop')}",
                 f"scrollHeight={info.get('scrollHeight')}",
             )
+
+        # 计算日期止损时间戳（毫秒）— 当天 04:00:00 为边界
+        stop_ts_ms: int = 0
+        if stop_date:
+            stop_dt = datetime.strptime(stop_date, "%Y-%m-%d") + timedelta(hours=4)
+            stop_ts_ms = int(stop_dt.timestamp() * 1000)
+            if not quiet:
+                print(f"  日期止损: 当最早消息早于 {stop_date} 04:00 时自动停止")
 
         idle = 0
         for round_i in range(1, max_rounds + 1):
@@ -729,8 +743,24 @@ def grab_group_via_network(
                 raise RuntimeError("消息列表消失，抓取中止")
             dispatch_wheel(cdp, info["x"], info["y"], delta_y, wheel_events)
             cdp.drain(round_wait)
-            added = fetch_pending_messages(cdp, all_messages, conv_id)
+            added = fetch_pending_messages(cdp, all_messages, local_conv_id)
             idle = idle + 1 if added == 0 else 0
+
+            # ── 日期止损检查 ──
+            if stop_ts_ms > 0 and all_messages:
+                earliest_ms = min(
+                    (int(m.get("created_at_ms", 0)) for m in all_messages.values()
+                     if m.get("created_at_ms")),
+                    default=0,
+                )
+                if earliest_ms and earliest_ms < stop_ts_ms:
+                    cdp.stats["stop_reason"] = f"date_reached({stop_date})"
+                    if not quiet:
+                        earliest_dt = datetime.fromtimestamp(earliest_ms / 1000)
+                        print(
+                            f"  日期止损: 最早消息 {earliest_dt} 早于 {stop_date}，停止抓取"
+                        )
+                    break
 
             if not quiet:
                 after = get_message_list_info(cdp)
@@ -747,30 +777,44 @@ def grab_group_via_network(
 
         # Drain once more in case the final wheel burst is still returning bodies.
         cdp.drain(round_wait)
-        fetch_pending_messages(cdp, all_messages, conv_id)
+        fetch_pending_messages(cdp, all_messages, local_conv_id)
         user_map = get_user_map(cdp)
+    except Exception as exc:
+        grab_error = exc
+        print(f"\n⚠️ 抓取中断: {exc}", file=sys.stderr)
+        print(f"   已抓取 {len(all_messages)} 条消息，正在保存...", file=sys.stderr)
     finally:
         cdp.close()
 
-    messages = sorted(all_messages.values(), key=sort_key)
-    json_path, md_path = write_outputs(
-        group_name,
-        conv_id if "conv_id" in locals() else None,
-        messages,
-        user_map if "user_map" in locals() else {},
-        cdp.stats,
-        output_md,
-        started_at,
-    )
+    # ★ 无论成功或失败，都保存已抓到的数据
+    if all_messages:
+        messages = sorted(all_messages.values(), key=sort_key)
+        json_path, md_path = write_outputs(
+            group_name,
+            local_conv_id,
+            messages,
+            user_map,
+            cdp.stats,
+            output_md,
+            started_at,
+        )
+
+        if grab_error:
+            print(f"   ✅ 部分数据已保存: {json_path}", file=sys.stderr)
+    else:
+        json_path = None
+        md_path = None
+        messages = []
 
     result = {
         "group_name": group_name,
-        "conv_id": conv_id if "conv_id" in locals() else None,
+        "conv_id": local_conv_id,
         "total_messages": len(messages),
-        "json_path": str(json_path),
-        "md_path": str(md_path) if md_path else None,
+        "json_path": str(json_path) if json_path else "",
+        "md_path": str(md_path) if md_path else "",
         "elapsed_seconds": round(time.time() - started_at, 1),
         "stats": dict(cdp.stats),
+        "partial": bool(grab_error),
     }
     if not quiet:
         print(f"JSON: {json_path}")
@@ -790,10 +834,12 @@ def main(argv: list[str] | None = None) -> int:
         round_wait=args.round_wait,
         output_md=not args.no_md,
         quiet=args.quiet,
+        stop_date=args.stop_date,
     )
     if args.quiet:
         print(json.dumps(result, ensure_ascii=False))
-    return 0
+    # 部分数据返回非零 exit code，让调用方知道有异常，但 JSON 已输出
+    return 1 if result.get("partial") else 0
 
 
 if __name__ == "__main__":

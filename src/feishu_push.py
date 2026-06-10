@@ -1,15 +1,27 @@
 #!/usr/bin/env python3
 """
-飞书推送：将日报 Markdown 转为飞书卡片消息，通过 Webhook 发送到群聊。
+飞书推送：将日报 Markdown 创建为飞书云文档，并通过 Webhook 发送文档链接到群聊。
 """
 from __future__ import annotations
 
 import argparse
 import json
+import shutil
+import subprocess
 import sys
-import time
 from pathlib import Path
 from typing import Optional
+
+# ── lark-cli 路径 ──────────────────────────────────────────────
+LARK_CLI = shutil.which("lark-cli") or ""
+if not LARK_CLI and sys.platform == "win32":
+    # 常见的 npm 全局安装路径
+    for candidate in [
+        Path.home() / "AppData" / "Roaming" / "npm" / "lark-cli.cmd",
+    ]:
+        if candidate.exists():
+            LARK_CLI = str(candidate)
+            break
 
 # Windows 终端 UTF-8 兼容
 if sys.platform == "win32":
@@ -21,13 +33,9 @@ import requests
 # ── 根目录定位 ──────────────────────────────────────────────
 ROOT = Path(__file__).resolve().parent.parent
 
-# 飞书消息体最大长度（字节），留有安全边距
-MAX_MSG_BYTES = 28_000
-
 
 def load_webhook_url() -> Optional[str]:
     """从配置文件读取飞书 Webhook URL。优先级：feishu_webhook.json > settings.json"""
-    # 先尝试专用配置文件
     wh_path = ROOT / "config" / "feishu_webhook.json"
     if wh_path.exists():
         with open(wh_path, "r", encoding="utf-8") as f:
@@ -36,7 +44,6 @@ def load_webhook_url() -> Optional[str]:
         if url:
             return url
 
-    # 再尝试 settings.json
     settings_path = ROOT / "config" / "settings.json"
     if settings_path.exists():
         with open(settings_path, "r", encoding="utf-8") as f:
@@ -54,59 +61,82 @@ def load_file(path: Path) -> str:
         return f.read()
 
 
-def split_content(content: str, max_bytes: int = MAX_MSG_BYTES) -> list[str]:
-    """将超长内容按段落边界分割。"""
-    if len(content.encode("utf-8")) <= max_bytes:
-        return [content]
+def create_cloud_doc(title: str, markdown_content: str) -> Optional[str]:
+    """
+    通过 lark-cli 创建飞书云文档。
+    使用 --content - 从 stdin 管道传入内容，彻底避开 Windows 命令行 8191 字符长度限制。
+    返回文档 URL，失败返回 None。
+    """
+    if not LARK_CLI:
+        print("  错误: 找不到 lark-cli，请确保已安装", file=sys.stderr)
+        return None
 
-    chunks = []
-    paragraphs = content.split("\n\n")
-    current = ""
+    try:
+        # --content - 从 stdin 读取内容，完全绕过命令行长度限制
+        result = subprocess.run(
+            [
+                LARK_CLI, "docs", "+create",
+                "--api-version", "v2",
+                "--doc-format", "markdown",
+                "--content", "-",
+            ],
+            input=markdown_content,
+            capture_output=True, text=True, encoding="utf-8",
+            timeout=60, cwd=str(ROOT),
+        )
 
-    for para in paragraphs:
-        candidate = current + ("\n\n" if current else "") + para
-        if len(candidate.encode("utf-8")) > max_bytes:
-            if current:
-                chunks.append(current)
-                current = para
-            else:
-                # 单个段落就超长，强制按字符截断
-                chunks.append(para[:max_bytes // 3])
-                current = ""
-        else:
-            current = candidate
+        if result.returncode != 0:
+            print(f"  lark-cli 错误 (exit={result.returncode}):", file=sys.stderr)
+            print(f"  stderr: {result.stderr.strip()[:500]}", file=sys.stderr)
+            return None
 
-    if current:
-        chunks.append(current)
+        data = json.loads(result.stdout)
+        if not data.get("ok"):
+            print(f"  创建文档失败: {data}", file=sys.stderr)
+            return None
 
-    return chunks
+        doc_url = data["data"]["document"]["url"]
+        return doc_url
+
+    except subprocess.TimeoutExpired:
+        print("  创建文档超时", file=sys.stderr)
+        return None
+    except json.JSONDecodeError as e:
+        print(f"  解析 lark-cli 输出失败: {e}", file=sys.stderr)
+        return None
 
 
-def build_card(title: str, markdown_content: str, part: int = 0, total: int = 1) -> dict:
-    """构造飞书 interactive 卡片消息。"""
-    header_title = title if total == 1 else f"{title} ({part + 1}/{total})"
-
-    return {
+def notify_webhook(webhook_url: str, doc_url: str, title: str) -> bool:
+    """通过 Webhook 发送简短通知，告知群成员文档已就绪。"""
+    card = {
         "msg_type": "interactive",
         "card": {
             "header": {
-                "title": {"tag": "plain_text", "content": header_title},
-                "template": "blue",
+                "title": {"tag": "plain_text", "content": "📊 日报已生成"},
+                "template": "green",
             },
             "elements": [
                 {
                     "tag": "markdown",
-                    "content": markdown_content,
-                }
+                    "content": f"**{title}** 已同步至飞书云文档，点击下方链接查看：\n\n👉 [{title}]({doc_url})",
+                },
+                {
+                    "tag": "action",
+                    "actions": [
+                        {
+                            "tag": "button",
+                            "text": {"tag": "plain_text", "content": "📄 打开日报"},
+                            "url": doc_url,
+                            "type": "default",
+                        }
+                    ],
+                },
             ],
         },
     }
 
-
-def send_to_feishu(webhook_url: str, payload: dict) -> bool:
-    """发送消息到飞书 Webhook。"""
     try:
-        resp = requests.post(webhook_url, json=payload, timeout=15)
+        resp = requests.post(webhook_url, json=card, timeout=15)
         body = resp.json()
         if resp.status_code == 200 and body.get("code") == 0:
             return True
@@ -119,46 +149,42 @@ def send_to_feishu(webhook_url: str, payload: dict) -> bool:
 
 def push_report(report_path: Path, group_name: str, target_date: str) -> bool:
     """
-    主入口：读取日报 → 构造飞书卡片 → 发送。
-    返回是否全部发送成功。
+    主入口：读取日报 → 创建飞书云文档 → 发送链接到群聊。
     """
-    webhook_url = load_webhook_url()
-    if not webhook_url:
-        print("  错误: 未配置飞书 Webhook URL", file=sys.stderr)
-        print("  请在 config/feishu_webhook.json 中填入 webhook_url", file=sys.stderr)
-        return False
-
+    # 1. 读取日报
     content = load_file(report_path)
     if not content.strip():
         print("  错误: 日报内容为空", file=sys.stderr)
         return False
 
-    title = f"📊 {group_name}日报 · {target_date}"
-    chunks = split_content(content)
+    title = f"{group_name}日报 · {target_date}"
 
-    if len(chunks) == 1:
-        print(f"  发送 1 条消息...")
+    # 2. 创建飞书云文档
+    print(f"  创建飞书云文档...")
+    doc_url = create_cloud_doc(title, content)
+    if not doc_url:
+        print("  ❌ 云文档创建失败", file=sys.stderr)
+        return False
+    print(f"  ✅ 云文档已创建: {doc_url}")
+
+    # 3. 通过 Webhook 发送文档链接通知
+    webhook_url = load_webhook_url()
+    if not webhook_url:
+        print("  ⚠️ 未配置飞书 Webhook URL，跳过群聊通知", file=sys.stderr)
+        print(f"  文档链接: {doc_url}")
+        return True  # 文档已创建，不算失败
+
+    if notify_webhook(webhook_url, doc_url, title):
+        print(f"  ✅ 已发送群聊通知")
     else:
-        print(f"  内容较长，分 {len(chunks)} 条发送...")
+        print(f"  ❌ 群聊通知发送失败（文档已创建: {doc_url}）")
+        return False
 
-    success = True
-    for i, chunk in enumerate(chunks):
-        card = build_card(title, chunk, part=i, total=len(chunks))
-        if send_to_feishu(webhook_url, card):
-            print(f"  ✅ 第 {i + 1}/{len(chunks)} 条发送成功")
-        else:
-            print(f"  ❌ 第 {i + 1}/{len(chunks)} 条发送失败")
-            success = False
-
-        # 多条消息间短暂间隔，避免触发飞书限速
-        if i < len(chunks) - 1:
-            time.sleep(1)
-
-    return success
+    return True
 
 
 def main():
-    parser = argparse.ArgumentParser(description="飞书推送：发送群聊日报到飞书群")
+    parser = argparse.ArgumentParser(description="飞书推送：创建云文档并发送链接到群聊")
     parser.add_argument("report_path", help="日报 Markdown 文件路径")
     parser.add_argument("--date", required=True, help="日报日期 YYYY-MM-DD")
     parser.add_argument("--group", default="财富自由团", help="群名")

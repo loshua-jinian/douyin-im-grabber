@@ -143,9 +143,10 @@ def filter_messages_by_date(
 ) -> list[dict[str, Any]]:
     """
     过滤出目标日期的文本消息，解析并标注发送人昵称。
+    日报时间窗口：当天 04:00:00 ~ 次日 03:59:59
     返回格式：[{time, sender, text, uid}, ...]
     """
-    day_start = datetime.strptime(target_date, "%Y-%m-%d")
+    day_start = datetime.strptime(target_date, "%Y-%m-%d") + timedelta(hours=4)
     day_end = day_start + timedelta(days=1)
 
     result = []

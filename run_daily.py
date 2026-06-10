@@ -15,6 +15,11 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
+# Windows 终端 UTF-8 兼容
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 # ── 根目录定位 ──────────────────────────────────────────────
 ROOT = Path(__file__).resolve().parent
 SRC_DIR = ROOT / "src"
@@ -35,7 +40,7 @@ def step_header(title: str) -> None:
     print(f"{'=' * 50}")
 
 
-def run_grabber(group_name: str, settings: dict) -> tuple[Path, Path]:
+def run_grabber(group_name: str, target_date: str, settings: dict) -> tuple[Path, Path]:
     """Step 1: 抓取群聊数据。返回 (json_path, md_path)。"""
     step_header("Step 1: 抓取群聊数据")
 
@@ -54,31 +59,47 @@ def run_grabber(group_name: str, settings: dict) -> tuple[Path, Path]:
         "--group", group_name,
         "--max-rounds", str(grab_cfg.get("max_rounds", 160)),
         "--idle-rounds", str(grab_cfg.get("idle_rounds", 10)),
+        "--stop-date", target_date,
         "--quiet",
     ]
 
     print(f"  执行: {' '.join(cmd)}")
     result = subprocess.run(cmd, env=env, cwd=str(ROOT), capture_output=True, text=True)
 
-    if result.returncode != 0:
-        print(f"  错误: 抓取失败", file=sys.stderr)
-        print(f"  stdout: {result.stdout}", file=sys.stderr)
-        print(f"  stderr: {result.stderr}", file=sys.stderr)
-        sys.exit(1)
+    # 从 quiet 模式的 JSON 输出中解析路径（成功或部分成功都会有）
+    json_path: Path | None = None
+    md_path: Path | None = None
+    parse_error: str | None = None
 
-    # 从 quiet 模式的 JSON 输出中解析路径
     try:
         info = json.loads(result.stdout.strip())
-        json_path = Path(info["json_path"])
-        md_path = Path(info.get("md_path") or "")
+        json_path = Path(info["json_path"]) if info.get("json_path") else None
+        md_path = Path(info["md_path"]) if info.get("md_path") else None
+        partial = info.get("partial", False)
     except (json.JSONDecodeError, KeyError) as e:
-        print(f"  错误: 无法解析抓取结果 — {e}", file=sys.stderr)
+        parse_error = str(e)
+
+    if result.returncode != 0:
+        # 抓取出错，但可能已保存部分数据
+        if json_path and json_path.exists():
+            print(f"  ⚠️ 抓取中断，但部分数据已保存 ({info.get('total_messages', '?')} 条)")
+            print(f"  JSON: {json_path}")
+            print(f"  MD:   {md_path}")
+            return json_path, md_path or Path("")
+        else:
+            print(f"  错误: 抓取失败且无数据产出", file=sys.stderr)
+            print(f"  stdout: {result.stdout[:500]}", file=sys.stderr)
+            print(f"  stderr: {result.stderr[:500]}", file=sys.stderr)
+            sys.exit(1)
+
+    if parse_error or not json_path:
+        print(f"  错误: 无法解析抓取结果 — {parse_error}", file=sys.stderr)
         print(f"  stdout: {result.stdout[:500]}", file=sys.stderr)
         sys.exit(1)
 
     print(f"  JSON: {json_path}")
     print(f"  MD:   {md_path}")
-    return json_path, md_path
+    return json_path, md_path or Path("")
 
 
 def archive_files(json_path: Path, md_path: Path, target_date: str, group_name: str) -> Path:
@@ -110,26 +131,33 @@ def archive_files(json_path: Path, md_path: Path, target_date: str, group_name: 
 
 
 def run_script(module: str, args: list[str], description: str) -> Path:
-    """运行 Python 脚本并返回输出文件路径。"""
+    """运行 Python 脚本并返回输出文件路径。实时输出进度，避免长时间无响应。"""
     cmd = [sys.executable, str(SRC_DIR / f"{module}.py")] + args
     print(f"  执行: {' '.join(cmd)}")
-    result = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True)
 
-    if result.stdout:
-        print(result.stdout.strip())
-    if result.stderr and result.returncode != 0:
-        print(result.stderr.strip(), file=sys.stderr)
+    output_path = Path(".")
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(ROOT),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    # 实时逐行输出，同时捕获 "输出: xxx" 行
+    for line in proc.stdout:
+        line = line.rstrip("\n")
+        print(line)
+        if line.startswith("输出:") or line.startswith("  输出:"):
+            output_path = Path(line.split(":", 1)[1].strip())
 
-    if result.returncode != 0:
-        print(f"  错误: {description} 失败", file=sys.stderr)
+    proc.wait()
+    if proc.returncode != 0:
+        print(f"  错误: {description} 失败 (exit={proc.returncode})", file=sys.stderr)
         sys.exit(1)
 
-    # 从输出中提取文件路径（最后一行 "输出: xxx"）
-    for line in result.stdout.strip().split("\n"):
-        if line.startswith("输出:") or line.startswith("  输出:"):
-            return Path(line.split(":", 1)[1].strip())
-    # 回退：无法解析路径
-    return Path(".")
+    return output_path
 
 
 def main():
@@ -167,7 +195,7 @@ def main():
         step_header("Step 1: 跳过抓取（使用已有数据）")
         print(f"  JSON: {json_path}")
     else:
-        json_path, md_path = run_grabber(group_name, settings)
+        json_path, md_path = run_grabber(group_name, target_date, settings)
 
     # ── Step 2: 归档 ──
     if not args.skip_grab:
